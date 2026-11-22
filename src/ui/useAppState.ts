@@ -15,17 +15,23 @@ import type {
 } from '../domain/types';
 import { DEFAULT_SCOPE } from '../domain/types';
 import type { ComparisonResult } from '../domain/engine';
+import type { AttributionCause, BalanceAnalysis, BalanceData, BalanceResult } from '../domain/balance/types';
+import { emptyBalanceData } from '../domain/balance/types';
+import { reviewAnalysis } from '../domain/balance/service';
 import {
   clearAll,
   fileDeclaration,
+  getAllBalance,
   getAllKv,
   getMeta,
   intakeFiles,
   isSampleImported,
   listAudits,
+  listBalanceAnalyses,
   listDeclarations,
   listRecalcCandidates,
   readingsByFile,
+  saveBalanceAnalysis,
   saveRecalcCandidate,
   setMeta,
   addAudit,
@@ -33,7 +39,7 @@ import {
 import type { AuditEntry } from '../db/db';
 import { createWorkerClient, type WorkerClient } from '../worker/client';
 import { buildRecalcCandidate, detectLateReadings } from '../domain/service';
-import { fetchSampleManifest, importLateBatch, loadSampleBase, type LoadProgress } from '../sample/loadSample';
+import { fetchSampleManifest, importLateBalanceBatch, importLateBatch, loadSampleBase, type LoadProgress } from '../sample/loadSample';
 import { dayKeyFromMs } from '../domain/time';
 
 export interface Toast {
@@ -66,6 +72,13 @@ export interface AppState {
   fingerprints: { fileName: string; expected: string; actual: string; ok: boolean }[];
   toasts: Toast[];
   lastComputeMs: number | null;
+  /** 工艺段平衡分析 */
+  balance: BalanceData;
+  balancePlantId: string;
+  balanceDay: string;
+  balanceResult: BalanceResult | null;
+  balanceAnalyses: BalanceAnalysis[];
+  balanceComputing: boolean;
 }
 
 export interface AppActions {
@@ -86,6 +99,10 @@ export interface AppActions {
   dismissToast: (id: string) => void;
   lookupFileReadings: (fileId: string) => Promise<number>;
   refreshLedgers: () => Promise<void>;
+  setBalanceDay: (day: string) => void;
+  runBalanceAnalysis: () => Promise<void>;
+  importLateBalance: () => Promise<void>;
+  reviewBalance: (analysisId: string, causes: AttributionCause[], note: string) => Promise<void>;
 }
 
 function emptyDataset(): Dataset {
@@ -128,6 +145,12 @@ export function useAppState(): { state: AppState; actions: AppActions } {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [fingerprints, setFingerprints] = useState<AppState['fingerprints']>([]);
   const [lastComputeMs, setLastComputeMs] = useState<number | null>(null);
+  const [balance, setBalance] = useState<BalanceData>(emptyBalanceData);
+  const [balancePlantId, setBalancePlantId] = useState('P1');
+  const [balanceDay, setBalanceDay] = useState('2026-11-18');
+  const [balanceResult, setBalanceResult] = useState<BalanceResult | null>(null);
+  const [balanceAnalyses, setBalanceAnalyses] = useState<BalanceAnalysis[]>([]);
+  const [balanceComputing, setBalanceComputing] = useState(false);
 
   const toast = useCallback((kind: Toast['kind'], text: string) => {
     const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -137,24 +160,26 @@ export function useAppState(): { state: AppState; actions: AppActions } {
   const dismissToast = useCallback((id: string) => setToasts((prev) => prev.filter((t) => t.id !== id)), []);
 
   const refreshLedgers = useCallback(async () => {
-    const [decls, recs, auditList, intake, mf] = await Promise.all([
+    const [decls, recs, auditList, intake, mf, analyses] = await Promise.all([
       listDeclarations(),
       listRecalcCandidates(),
       listAudits(),
       intakeFiles(),
       fetchSampleManifest().catch(() => null),
+      listBalanceAnalyses(),
     ]);
     setDeclarations(decls);
     setCandidates(recs);
     setAudits(auditList);
     setFiles(intake);
+    setBalanceAnalyses(analyses);
     if (mf) setManifest(mf);
   }, []);
 
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await getAllKv();
+      const [data, bal] = await Promise.all([getAllKv(), getAllBalance()]);
       const ds: Dataset = {
         plants: data.plants,
         points: data.points,
@@ -166,6 +191,10 @@ export function useAppState(): { state: AppState; actions: AppActions } {
         files: data.files,
       };
       setDataset(ds);
+      setBalance(bal);
+      if (bal.units.length > 0) setBalancePlantId(bal.units[0].plantId);
+      const balDays = [...new Set(bal.readings.map((r) => r.dayKey))].sort();
+      if (balDays.length > 0) setBalanceDay(balDays[0]);
       const storedPoint = await getMeta<string>(DEFAULT_POINT_STORAGE);
       const storedDay = await getMeta<string>(DEFAULT_DAY_STORAGE);
       const storedActor = await getMeta<string>(ACTOR_STORAGE);
@@ -196,11 +225,18 @@ export function useAppState(): { state: AppState; actions: AppActions } {
     try {
       const loaded = await loadSampleBase((p) => setProgress(p), actor);
       setDataset(loaded.dataset);
+      setBalance(loaded.balance);
       setManifest(loaded.manifest);
       setFingerprints(loaded.fingerprintMatches);
       const focusPoint = loaded.manifest.focus.pointCode;
       setPointCode(focusPoint);
       setDay(loaded.manifest.focus.day);
+      if (loaded.manifest.balanceFocus) {
+        setBalancePlantId(loaded.manifest.balanceFocus.plantId);
+        setBalanceDay(loaded.manifest.balanceFocus.day);
+      } else if (loaded.balance.units.length > 0) {
+        setBalancePlantId(loaded.balance.units[0].plantId);
+      }
       await setMeta(DEFAULT_POINT_STORAGE, focusPoint);
       await setMeta(DEFAULT_DAY_STORAGE, loaded.manifest.focus.day);
       await refreshLedgers();
@@ -208,7 +244,7 @@ export function useAppState(): { state: AppState; actions: AppActions } {
         at: Date.now(),
         actor,
         action: 'LOAD_SAMPLE',
-        detail: `装载样例：${loaded.dataset.files.length} 份文件，${loaded.dataset.readings.length} 条读数；指纹校验 ${loaded.fingerprintMatches.filter((f) => f.ok).length}/${loaded.fingerprintMatches.length} 通过`,
+        detail: `装载样例：${loaded.dataset.files.length} 份文件，${loaded.dataset.readings.length} 条排口读数、${loaded.balance.readings.length} 条支路读数；指纹校验 ${loaded.fingerprintMatches.filter((f) => f.ok).length}/${loaded.fingerprintMatches.length} 通过`,
         refIds: loaded.dataset.files.map((f) => f.fileId),
       });
       if (loaded.warnings.length > 0) toast('warn', loaded.warnings.join('；'));
@@ -409,6 +445,9 @@ export function useAppState(): { state: AppState; actions: AppActions } {
   const reset = useCallback(async () => {
     await clearAll();
     setDataset(emptyDataset());
+    setBalance(emptyBalanceData());
+    setBalanceResult(null);
+    setBalanceAnalyses([]);
     setDeclarations([]);
     setCandidates([]);
     setAudits([]);
@@ -417,6 +456,98 @@ export function useAppState(): { state: AppState; actions: AppActions } {
     setComparison(null);
     toast('info', '本地库已清空（需重新装载样例）');
   }, [toast]);
+
+  /** 平衡分析：生成不可改写的新版本（MANUAL 触发） */
+  const runBalanceAnalysis = useCallback(async () => {
+    if (balance.units.length === 0) {
+      toast('warn', '尚未装载平衡分析资料（边界登记/不确定度库）');
+      return;
+    }
+    setBalanceComputing(true);
+    try {
+      if (!workerRef.current) workerRef.current = createWorkerClient();
+      const analysis = await workerRef.current.request<BalanceAnalysis>({
+        type: 'buildBalanceAnalysis',
+        balance,
+        files: files,
+        plantId: balancePlantId,
+        day: balanceDay,
+        trigger: 'MANUAL',
+        createdBy: actor,
+        existing: balanceAnalyses,
+      });
+      await saveBalanceAnalysis(analysis);
+      toast('success', `已生成平衡分析 v${analysis.version}（不可改写）`);
+      await refreshLedgers();
+    } catch (error) {
+      toast('error', `生成平衡分析失败：${(error as Error).message}`);
+    } finally {
+      setBalanceComputing(false);
+    }
+  }, [actor, balance, balanceAnalyses, balanceDay, balancePlantId, files, refreshLedgers, toast]);
+
+  /** 导入补传流量：若缩窄已审核残差则生成新版本（LATE_DATA 触发） */
+  const importLateBalance = useCallback(async () => {
+    if (!manifest?.lateBalanceFile) {
+      toast('warn', '样例清单中没有补传流量文件');
+      return;
+    }
+    setBalanceComputing(true);
+    try {
+      const result = await importLateBalanceBatch(balance, manifest, actor);
+      if (!result) return;
+      setBalance(result.balance);
+      if (!result.fingerprint.ok) toast('warn', '补传流量文件指纹与清单不一致');
+      await addAudit({
+        at: Date.now(),
+        actor,
+        action: 'IMPORT_LATE_FLOW',
+        detail: `导入补传流量 ${result.file.fileName}：${result.readingsAdded} 条读数（接收时刻 ${new Date(result.file.receivedAt).toISOString()}）`,
+        refIds: [result.file.fileId],
+      });
+      if (!workerRef.current) workerRef.current = createWorkerClient();
+      const detection = await workerRef.current.request<import('../domain/balance/service').LateNarrowing>({
+        type: 'detectBalanceLate',
+        balance: result.balance,
+        files: [...files, result.file],
+        plantId: balancePlantId,
+        day: balanceDay,
+        analyses: balanceAnalyses,
+        createdBy: actor,
+      });
+      if (detection.narrowed && detection.analysis) {
+        await saveBalanceAnalysis(detection.analysis);
+        toast('success', `补传流量已入库；${detection.evidence}`);
+      } else {
+        toast('info', `补传流量已入库（${result.readingsAdded} 条）；${detection.evidence}`);
+      }
+      await refreshLedgers();
+    } catch (error) {
+      toast('error', `导入补传流量失败：${(error as Error).message}`);
+    } finally {
+      setBalanceComputing(false);
+    }
+  }, [actor, balance, balanceAnalyses, balanceDay, balancePlantId, files, manifest, refreshLedgers, toast]);
+
+  /** 复核平衡分析：仅追加复核结论与状态迁移，结果体不变 */
+  const reviewBalance = useCallback(
+    async (analysisId: string, causes: AttributionCause[], note: string) => {
+      const target = balanceAnalyses.find((a) => a.analysisId === analysisId);
+      if (!target) return;
+      const updated = reviewAnalysis(target, causes, note, actor, Date.now());
+      await saveBalanceAnalysis(updated);
+      await addAudit({
+        at: Date.now(),
+        actor,
+        action: 'REVIEW_BALANCE',
+        detail: `复核平衡分析 ${analysisId}：归因 ${causes.join('、') || '未选择'}；${note || '无附注'}`,
+        refIds: [analysisId],
+      });
+      toast('success', `分析 v${target.version} 已标记复核（结果体不变）`);
+      await refreshLedgers();
+    },
+    [actor, balanceAnalyses, refreshLedgers, toast],
+  );
 
   const lookupFileReadings = useCallback(async (fileId: string) => {
     const list = await readingsByFile(fileId);
@@ -441,6 +572,37 @@ export function useAppState(): { state: AppState; actions: AppActions } {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, dataset.readings.length, pointCode, day, method, scope, dataset.instruments.length]);
+
+  // 平衡分析预览：平衡资料或分析日变化后经 Worker 计算（不保存版本）
+  useEffect(() => {
+    if (!ready || balance.units.length === 0) {
+      setBalanceResult(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        if (!workerRef.current) workerRef.current = createWorkerClient();
+        const result = await workerRef.current.request<BalanceResult>({
+          type: 'computeBalance',
+          balance,
+          plantId: balancePlantId,
+          day: balanceDay,
+        });
+        if (!cancelled) setBalanceResult(result);
+      } catch (error) {
+        if (!cancelled) {
+          setBalanceResult(null);
+          toast('error', `平衡分析计算失败：${(error as Error).message}`);
+        }
+      }
+    }, 120);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, balance, balancePlantId, balanceDay]);
 
   const days = useMemo(() => pickDays(dataset, pointCode), [dataset, pointCode]);
   const month = day.slice(0, 7);
@@ -477,6 +639,12 @@ export function useAppState(): { state: AppState; actions: AppActions } {
     fingerprints,
     toasts,
     lastComputeMs,
+    balance,
+    balancePlantId,
+    balanceDay,
+    balanceResult,
+    balanceAnalyses,
+    balanceComputing,
   };
   const actions: AppActions = {
     reload,
@@ -496,6 +664,10 @@ export function useAppState(): { state: AppState; actions: AppActions } {
     dismissToast,
     lookupFileReadings,
     refreshLedgers,
+    setBalanceDay,
+    runBalanceAnalysis,
+    importLateBalance,
+    reviewBalance,
   };
   void days;
   void month;

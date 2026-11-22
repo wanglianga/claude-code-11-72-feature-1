@@ -93,6 +93,92 @@
     "sha256": "3db852de6086b84ec37270def448fd0e4c79f5ef07f66172048c7fc6e2f4b2fe",
     "note": "迟到补录：CC-E01 02:00–02:03 缺测段的 10 秒读数，申报出具后才到达。"
   },
+  "balanceFiles": [
+    {
+      "fileName": "process_units.csv",
+      "kind": "PROCESS_UNIT_REGISTER",
+      "receivedAt": "2026-11-19T06:10:00+08:00",
+      "rowCount": 4,
+      "sha256": "853970f89daac0009eaea9f368073c8a981dd1e1657c36a1c62434b0763f79f9",
+      "note": "工艺单元登记：水面面积与可达滞后时间带"
+    },
+    {
+      "fileName": "boundary_streams.csv",
+      "kind": "BOUNDARY_STREAM_REGISTER",
+      "receivedAt": "2026-11-19T06:10:00+08:00",
+      "rowCount": 8,
+      "sha256": "0bde93fd739e69d614aba30b4cf529669e97543e28a9e565fe2ffb86eb7b24b7",
+      "note": "边界流登记：进出水/回流/排泥/反冲洗/旁通，含支路有效期与缺测估计"
+    },
+    {
+      "fileName": "meter_specs.csv",
+      "kind": "METER_SPEC_REGISTER",
+      "receivedAt": "2026-11-19T06:10:00+08:00",
+      "rowCount": 17,
+      "sha256": "1089b5f6af4d420e9e337cd4f4cfe6f3dc1a246ce9533fbefe57d26edd990466",
+      "note": "不确定度库：仪表精度、共用校准组、可接受调整范围"
+    },
+    {
+      "fileName": "removal_params.csv",
+      "kind": "REMOVAL_PARAM_REGISTER",
+      "receivedAt": "2026-11-19T06:10:00+08:00",
+      "rowCount": 9,
+      "sha256": "d5cd7e61cefed6baf4c07d76e89077963b92f023fbcb88c4dfa916930572c7ac",
+      "note": "去除参数台账：去除范围的全部假设来源"
+    },
+    {
+      "fileName": "pump_switches.csv",
+      "kind": "PUMP_SWITCH_LOG",
+      "receivedAt": "2026-11-19T06:10:00+08:00",
+      "rowCount": 1,
+      "sha256": "7c64285f50e230b5945988680f38f82975224faab68f1ad9d82a059d7be2bc8d",
+      "note": "回流泵切换事件：RETURN 支路据此拆腿"
+    },
+    {
+      "fileName": "stream_readings_P1_2026-11-18.csv",
+      "kind": "STREAM_READINGS",
+      "receivedAt": "2026-11-19T07:20:00+08:00",
+      "rowCount": 4241,
+      "sha256": "1d0a35821f4556a70469e391bac6a95359e63977bac7b4ccdee106e6368052b4",
+      "note": "P1 边界支路读数（4241 行；反冲洗 14:00–15:20 遥测中断）"
+    },
+    {
+      "fileName": "level_log_P1_2026-11-18.csv",
+      "kind": "LEVEL_LOG",
+      "receivedAt": "2026-11-19T07:20:00+08:00",
+      "rowCount": 194,
+      "sha256": "b7bb9895a13314d2d121f87abd94cbe785326a0c3e0ee8e9d923a135b7663a04",
+      "note": "液位记录（194 行）：U2 生化池午间蓄水 0.4 m"
+    },
+    {
+      "fileName": "process_log_P1_2026-11-18.csv",
+      "kind": "PROCESS_LOG",
+      "receivedAt": "2026-11-19T07:20:00+08:00",
+      "rowCount": 52,
+      "sha256": "e920f7d9b4fd8c2325d40526a73dcc64ddb90a368f0046430376e82ec8d90240",
+      "note": "工艺记录（52 行）：曝气/溶解氧/排泥/投药，去除范围唯一依据"
+    }
+  ],
+  "lateBalanceFile": {
+    "fileName": "late_flow_P1_2026-11-19.csv",
+    "kind": "LATE_FLOW_BATCH",
+    "receivedAt": "2026-11-19T16:40:00+08:00",
+    "rowCount": 64,
+    "sha256": "8b985c4056ebd55c4e352939f40539482de84353daf916a191f6b23cb40f8c50",
+    "note": "补传流量：反冲洗支路 14:00–15:20 缺测段（64 行），分析出具后到达"
+  },
+  "balanceFocus": {
+    "plantId": "P1",
+    "day": "2026-11-18",
+    "scenario": [
+      "反冲洗水混入主线：14:00–15:20 回流水 600 m³ 在进水计量点上游汇入，基础批次缺测，补传后残差缩窄",
+      "池内存量变化：生化池 08:00–12:00 蓄水 0.4 m（+800 m³），净 ΔV +100 m³",
+      "水力滞后：22:30 进水升高的可达时间带为次日 01:00–02:50，保持在途不强行配对",
+      "回流泵切换：11:00 P-R1 由 S-RET-A 切至 S-RET-B，内部循环从主线拆出",
+      "仪表误差叠加：各表偏差均在证书 k=2 区间内，路径 B 在证书边界内协调定位",
+      "停用支路：S-BYP 2026-11-20 起停用（2026-11-22 确认），不改写 11-18 平衡"
+    ]
+  },
   "focus": {
     "pointCode": "CC-E01",
     "day": "2026-11-18",

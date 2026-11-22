@@ -16,7 +16,19 @@ import {
   parseReadings,
   parseStates,
 } from '../src/sample/ingest';
+import {
+  mergeBalanceData,
+  parseBoundaryStreams,
+  parseLevelLog,
+  parseMeterSpecs,
+  parseProcessLog,
+  parseProcessUnits,
+  parsePumpSwitches,
+  parseRemovalParams,
+  parseStreamReadings,
+} from '../src/sample/ingestBalance';
 import type { Dataset, Reading, SampleManifest } from '../src/domain/types';
+import { emptyBalanceData, type BalanceData } from '../src/domain/balance/types';
 
 export function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -123,4 +135,66 @@ export function parseSampleFromDisk(dir: string, manifest: SampleManifest): {
     { lateMode: true },
   );
   return { baseDataset: dataset, lateReadings: lateParsed.readings, fingerprints };
+}
+
+/** 解析工艺段平衡分析资料（与浏览器装载走同一套解析器） */
+export function parseBalanceFromDisk(dir: string, manifest: SampleManifest): {
+  balance: BalanceData;
+  lateBalanceReadings: BalanceData['readings'];
+  fingerprints: { fileName: string; expected: string; actual: string; ok: boolean }[];
+} {
+  let balance = emptyBalanceData();
+  const fingerprints: { fileName: string; expected: string; actual: string; ok: boolean }[] = [];
+  const read = (name: string) => readFileSync(resolve(dir, name), 'utf8');
+  const sha = (name: string) => sha256File(resolve(dir, name));
+
+  for (const meta of manifest.balanceFiles ?? []) {
+    const text = read(meta.fileName);
+    const actual = sha(meta.fileName);
+    fingerprints.push({ fileName: meta.fileName, expected: meta.sha256, actual, ok: actual === meta.sha256 });
+    const fileId = `file:${meta.fileName}:${actual.slice(0, 16)}`;
+    const receivedAt = Date.parse(meta.receivedAt);
+    if (meta.kind === 'PROCESS_UNIT_REGISTER') {
+      const p = parseProcessUnits(text);
+      balance = mergeBalanceData(balance, { units: p.units });
+    } else if (meta.kind === 'BOUNDARY_STREAM_REGISTER') {
+      const p = parseBoundaryStreams(text);
+      balance = mergeBalanceData(balance, { streams: p.streams });
+    } else if (meta.kind === 'METER_SPEC_REGISTER') {
+      const p = parseMeterSpecs(text);
+      balance = mergeBalanceData(balance, { meters: p.meters });
+    } else if (meta.kind === 'REMOVAL_PARAM_REGISTER') {
+      const p = parseRemovalParams(text);
+      balance = mergeBalanceData(balance, { removalParams: p.params });
+    } else if (meta.kind === 'PUMP_SWITCH_LOG') {
+      const p = parsePumpSwitches(text);
+      balance = mergeBalanceData(balance, { pumpSwitches: p.switches });
+    } else if (meta.kind === 'LEVEL_LOG') {
+      const p = parseLevelLog(text, fileId, receivedAt);
+      balance = mergeBalanceData(balance, { levels: p.levels });
+    } else if (meta.kind === 'PROCESS_LOG') {
+      const p = parseProcessLog(text, fileId);
+      balance = mergeBalanceData(balance, { processRecords: p.records });
+    } else if (meta.kind === 'STREAM_READINGS') {
+      const p = parseStreamReadings(text, { fileId, kind: meta.kind, receivedAt }, balance.meters, balance.streams);
+      balance = mergeBalanceData(balance, { readings: p.readings });
+    }
+    void fileId;
+  }
+  const lateMeta = manifest.lateBalanceFile;
+  let lateBalanceReadings: BalanceData['readings'] = [];
+  if (lateMeta) {
+    const text = read(lateMeta.fileName);
+    const actual = sha(lateMeta.fileName);
+    fingerprints.push({ fileName: lateMeta.fileName, expected: lateMeta.sha256, actual, ok: actual === lateMeta.sha256 });
+    const parsed = parseStreamReadings(
+      text,
+      { fileId: `file:${lateMeta.fileName}:${actual.slice(0, 16)}`, kind: lateMeta.kind, receivedAt: Date.parse(lateMeta.receivedAt) },
+      balance.meters,
+      balance.streams,
+      { lateMode: true },
+    );
+    lateBalanceReadings = parsed.readings;
+  }
+  return { balance, lateBalanceReadings, fingerprints };
 }

@@ -152,7 +152,16 @@ export type FileKind =
   | 'CALIBRATION_REGISTER'
   | 'STATE_LOG'
   | 'READINGS'
-  | 'LATE_BATCH';
+  | 'LATE_BATCH'
+  | 'PROCESS_UNIT_REGISTER'
+  | 'BOUNDARY_STREAM_REGISTER'
+  | 'METER_SPEC_REGISTER'
+  | 'STREAM_READINGS'
+  | 'LEVEL_LOG'
+  | 'PROCESS_LOG'
+  | 'REMOVAL_PARAM_REGISTER'
+  | 'PUMP_SWITCH_LOG'
+  | 'LATE_FLOW_BATCH';
 
 export interface IntakeFile {
   fileId: string;
@@ -580,10 +589,33 @@ export interface SampleManifest {
     sha256: string;
     note: string;
   };
+  /** 工艺段平衡分析资料（边界登记/不确定度库/支路读数/液位/工艺记录等） */
+  balanceFiles?: {
+    fileName: string;
+    kind: FileKind;
+    receivedAt: string;
+    rowCount: number;
+    sha256: string;
+    note: string;
+  }[];
+  /** 补传流量（申报/分析出具后到达，缩窄已审核残差时生成新分析版本） */
+  lateBalanceFile?: {
+    fileName: string;
+    kind: FileKind;
+    receivedAt: string;
+    rowCount: number;
+    sha256: string;
+    note: string;
+  };
   focus: {
     pointCode: string;
     day: string;
     declarationCutoff: string;
+    scenario: string[];
+  };
+  balanceFocus?: {
+    plantId: string;
+    day: string;
     scenario: string[];
   };
 }

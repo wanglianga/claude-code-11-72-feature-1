@@ -5,8 +5,20 @@
 
 import { sha256Hex } from './csv';
 import { datasetCounts, mergeDataset, parseBindings, parseCalibrations, parseInstruments, parsePlants, parsePoints, parseReadings, parseStates } from './ingest';
+import {
+  mergeBalanceData,
+  parseBoundaryStreams,
+  parseLevelLog,
+  parseMeterSpecs,
+  parseProcessLog,
+  parseProcessUnits,
+  parsePumpSwitches,
+  parseRemovalParams,
+  parseStreamReadings,
+} from './ingestBalance';
 import type { Dataset, SampleManifest } from '../domain/types';
-import { markSampleImported, putBatch } from '../db/db';
+import { emptyBalanceData, type BalanceData } from '../domain/balance/types';
+import { markSampleImported, putBalanceBatch, putBatch, putStreamReadingsInChunks } from '../db/db';
 
 export interface LoadProgress {
   step: string;
@@ -29,13 +41,14 @@ async function fetchText(fileName: string): Promise<{ text: string; size: number
 
 export interface LoadedSample {
   dataset: Dataset;
+  balance: BalanceData;
   manifest: SampleManifest;
   fingerprintMatches: { fileName: string; expected: string; actual: string; ok: boolean }[];
   warnings: string[];
 }
 
 /**
- * 装载样例基础资料（不含迟到批次）。
+ * 装载样例基础资料（不含迟到批次与补传流量）。
  * 指纹以浏览器计算的 SHA-256 为准，与 manifest 对照，不一致时给出警告而不是静默通过。
  */
 export async function loadSampleBase(
@@ -44,8 +57,9 @@ export async function loadSampleBase(
 ): Promise<LoadedSample> {
   const manifest = await fetchSampleManifest();
   const files = manifest.baseFiles;
+  const balanceFiles = manifest.balanceFiles ?? [];
   let done = 0;
-  const total = files.length + 1;
+  const total = files.length + balanceFiles.length + 1;
   const warnings: string[] = [];
   const fingerprintMatches: LoadedSample['fingerprintMatches'] = [];
 
@@ -59,13 +73,14 @@ export async function loadSampleBase(
     readings: [],
     files: [],
   };
+  let balance: BalanceData = emptyBalanceData();
 
-  const texts = new Map<string, { text: string; size: number; sha: string }>();
-  for (const meta of files) {
+  const texts = new Map<string, { text: string; size: number; sha: string; kind: string; receivedAt: string; note: string; rowCount: number }>();
+  for (const meta of [...files, ...balanceFiles]) {
     onProgress({ step: `读取 ${meta.fileName}`, done, total });
     const { text, size } = await fetchText(meta.fileName);
     const sha = await sha256Hex(text);
-    texts.set(meta.fileName, { text, size, sha });
+    texts.set(meta.fileName, { text, size, sha, kind: meta.kind, receivedAt: meta.receivedAt, note: meta.note, rowCount: meta.rowCount });
     const ok = sha === meta.sha256;
     fingerprintMatches.push({ fileName: meta.fileName, expected: meta.sha256, actual: sha, ok });
     if (!ok) warnings.push(`${meta.fileName} 指纹与清单不一致（清单 ${meta.sha256.slice(0, 12)}…，实际 ${sha.slice(0, 12)}…）`);
@@ -73,7 +88,6 @@ export async function loadSampleBase(
   }
 
   const now = Date.now();
-  const receivedAt = Date.parse(files[0]?.receivedAt ?? new Date(now).toISOString());
 
   // 台账先行：读数解析依赖仪表与绑定
   for (const meta of files) {
@@ -148,8 +162,72 @@ export async function loadSampleBase(
     onProgress({ step: `解析 ${meta.fileName}`, done, total });
   }
 
+  // ---- 工艺段平衡分析资料 ----
+  const balanceFilesParsed: Dataset['files'] = [];
+  for (const meta of balanceFiles) {
+    const entry = texts.get(meta.fileName)!;
+    const fileId = `file:${meta.fileName}:${entry.sha.slice(0, 16)}`;
+    const received = Date.parse(meta.receivedAt);
+    let rejected = 0;
+    const rejectedReasons: string[] = [];
+    if (meta.kind === 'PROCESS_UNIT_REGISTER') {
+      const p = parseProcessUnits(entry.text);
+      balance = mergeBalanceData(balance, { units: p.units });
+      rejectedReasons.push(...p.errors);
+    } else if (meta.kind === 'BOUNDARY_STREAM_REGISTER') {
+      const p = parseBoundaryStreams(entry.text);
+      balance = mergeBalanceData(balance, { streams: p.streams });
+      rejectedReasons.push(...p.errors);
+    } else if (meta.kind === 'METER_SPEC_REGISTER') {
+      const p = parseMeterSpecs(entry.text);
+      balance = mergeBalanceData(balance, { meters: p.meters });
+      rejectedReasons.push(...p.errors);
+    } else if (meta.kind === 'REMOVAL_PARAM_REGISTER') {
+      const p = parseRemovalParams(entry.text);
+      balance = mergeBalanceData(balance, { removalParams: p.params });
+      rejectedReasons.push(...p.errors);
+    } else if (meta.kind === 'PUMP_SWITCH_LOG') {
+      const p = parsePumpSwitches(entry.text);
+      balance = mergeBalanceData(balance, { pumpSwitches: p.switches });
+      rejectedReasons.push(...p.errors);
+    } else if (meta.kind === 'LEVEL_LOG') {
+      const p = parseLevelLog(entry.text, fileId, received);
+      balance = mergeBalanceData(balance, { levels: p.levels });
+      rejectedReasons.push(...p.errors);
+    } else if (meta.kind === 'PROCESS_LOG') {
+      const p = parseProcessLog(entry.text, fileId);
+      balance = mergeBalanceData(balance, { processRecords: p.records });
+      rejectedReasons.push(...p.errors);
+    } else if (meta.kind === 'STREAM_READINGS') {
+      const p = parseStreamReadings(entry.text, { fileId, kind: meta.kind, receivedAt: received }, balance.meters, balance.streams);
+      balance = mergeBalanceData(balance, { readings: p.readings });
+      rejected = p.rejected;
+      rejectedReasons.push(...p.errors.slice(0, 20));
+    }
+    rejected = rejected || rejectedReasons.length;
+    balanceFilesParsed.push({
+      fileId,
+      fileName: meta.fileName,
+      sha256: entry.sha,
+      sizeBytes: entry.size,
+      kind: meta.kind,
+      receivedAt: received,
+      rowCount: meta.rowCount,
+      acceptedRows: meta.rowCount - rejected,
+      rejectedRows: rejected,
+      rejectedReasons,
+      note: meta.note,
+      ingestedAt: now,
+      ingestedBy,
+      sample: true,
+    });
+    done += 1;
+    onProgress({ step: `解析 ${meta.fileName}`, done, total });
+  }
+  dataset = mergeDataset(dataset, { files: balanceFilesParsed });
+
   const counts = datasetCounts(dataset);
-  onProgress({ step: `写入 IndexedDB（${counts.readings} 条读数）`, done, total });
+  onProgress({ step: `写入 IndexedDB（${counts.readings + balance.readings.length} 条读数）`, done, total });
   await putBatch({
     files: dataset.files,
     plants: dataset.plants,
@@ -161,10 +239,19 @@ export async function loadSampleBase(
   });
   const { putReadingsInChunks } = await import('../db/db');
   await putReadingsInChunks(dataset.readings);
+  await putBalanceBatch({
+    units: balance.units,
+    streams: balance.streams,
+    meters: balance.meters,
+    levels: balance.levels,
+    processRecords: balance.processRecords,
+    pumpSwitches: balance.pumpSwitches,
+    removalParams: balance.removalParams,
+  });
+  await putStreamReadingsInChunks(balance.readings);
   await markSampleImported(true);
   onProgress({ step: '完成', done: total, total });
-  void receivedAt;
-  return { dataset, manifest, fingerprintMatches, warnings };
+  return { dataset, balance, manifest, fingerprintMatches, warnings };
 }
 
 export interface LateImportResult {
@@ -213,6 +300,56 @@ export async function importLateBatch(base: Dataset, manifest: SampleManifest, i
     dataset,
     readingsAdded: parsed.readings.length,
     filesAdded: [fileId],
+    fingerprint: { expected: meta.sha256, actual: sha, ok },
+  };
+}
+
+export interface LateBalanceImportResult {
+  balance: BalanceData;
+  file: Dataset['files'][number];
+  readingsAdded: number;
+  fingerprint: { expected: string; actual: string; ok: boolean };
+}
+
+/** 导入补传流量（分析出具后到达；缩窄已审核残差时生成新分析版本） */
+export async function importLateBalanceBatch(base: BalanceData, manifest: SampleManifest, ingestedBy = '复核员'): Promise<LateBalanceImportResult | null> {
+  const meta = manifest.lateBalanceFile;
+  if (!meta) return null;
+  const entry = await fetchText(meta.fileName);
+  const sha = await sha256Hex(entry.text);
+  const ok = sha === meta.sha256;
+  const fileId = `file:${meta.fileName}:${sha.slice(0, 16)}`;
+  const received = Date.parse(meta.receivedAt);
+  const parsed = parseStreamReadings(
+    entry.text,
+    { fileId, kind: meta.kind, receivedAt: received },
+    base.meters,
+    base.streams,
+    { lateMode: true },
+  );
+  const file: Dataset['files'][number] = {
+    fileId,
+    fileName: meta.fileName,
+    sha256: sha,
+    sizeBytes: entry.size,
+    kind: meta.kind,
+    receivedAt: received,
+    rowCount: meta.rowCount,
+    acceptedRows: parsed.readings.length,
+    rejectedRows: parsed.rejected,
+    rejectedReasons: parsed.errors.slice(0, 20),
+    note: meta.note,
+    ingestedAt: Date.now(),
+    ingestedBy,
+    sample: true,
+  };
+  const balance = mergeBalanceData(base, { readings: parsed.readings });
+  await putBatch({ files: [file] });
+  await putStreamReadingsInChunks(parsed.readings);
+  return {
+    balance,
+    file,
+    readingsAdded: parsed.readings.length,
     fingerprint: { expected: meta.sha256, actual: sha, ok },
   };
 }

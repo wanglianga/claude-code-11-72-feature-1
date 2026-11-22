@@ -16,13 +16,20 @@ import {
 } from '../domain/types';
 import { compareRoutes, computeDayLoad, computeMonthLoad } from '../domain/engine';
 import { buildDeclaration, buildRecalcCandidate, detectLateReadings } from '../domain/service';
+import type { BalanceAnalysis, BalanceData, BalanceResult } from '../domain/balance/types';
+import { computeBalance } from '../domain/balance/solver';
+import { buildAnalysis, detectLateNarrowing } from '../domain/balance/service';
+import type { IntakeFile } from '../domain/types';
 
 export type WorkerRequest =
   | { id: string; type: 'computeDay'; dataset: Dataset; pointCode: string; day: string; method: IntegrationMethod; scope?: Partial<ScopeOptions>; withChart?: boolean }
   | { id: string; type: 'compareRoutes'; dataset: Dataset; pointCode: string; day: string; scope?: Partial<ScopeOptions> }
   | { id: string; type: 'computeMonth'; dataset: Dataset; pointCode: string; month: string; method: IntegrationMethod; scope?: Partial<ScopeOptions> }
   | { id: string; type: 'buildDeclaration'; dataset: Dataset; pointCode: string; day: string; method: IntegrationMethod; createdBy: string; scope?: Partial<ScopeOptions>; cutoffReceivedAt?: number }
-  | { id: string; type: 'buildRecalc'; dataset: Dataset; declaration: Declaration; createdBy: string; scope?: Partial<ScopeOptions>; autoDetected?: boolean };
+  | { id: string; type: 'buildRecalc'; dataset: Dataset; declaration: Declaration; createdBy: string; scope?: Partial<ScopeOptions>; autoDetected?: boolean }
+  | { id: string; type: 'computeBalance'; balance: BalanceData; plantId: string; day: string }
+  | { id: string; type: 'buildBalanceAnalysis'; balance: BalanceData; files: IntakeFile[]; plantId: string; day: string; trigger: BalanceAnalysis['trigger']; createdBy: string; existing: BalanceAnalysis[] }
+  | { id: string; type: 'detectBalanceLate'; balance: BalanceData; files: IntakeFile[]; plantId: string; day: string; analyses: BalanceAnalysis[]; createdBy: string };
 
 export interface WorkerResponseOk {
   id: string;
@@ -33,7 +40,10 @@ export interface WorkerResponseOk {
     | ReturnType<typeof compareRoutes>
     | MonthLoad
     | Declaration
-    | RecalcCandidate;
+    | RecalcCandidate
+    | BalanceResult
+    | BalanceAnalysis
+    | ReturnType<typeof detectLateNarrowing>;
   tookMs: number;
 }
 
@@ -101,6 +111,26 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
           scope: req.scope,
           autoDetected: req.autoDetected,
         });
+        post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
+        break;
+      }
+      case 'computeBalance': {
+        const payload = computeBalance(req.balance, req.plantId, req.day);
+        post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
+        break;
+      }
+      case 'buildBalanceAnalysis': {
+        const payload = buildAnalysis(
+          req.balance,
+          req.files,
+          { plantId: req.plantId, day: req.day, trigger: req.trigger, createdBy: req.createdBy, now: nowMs() },
+          req.existing,
+        );
+        post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
+        break;
+      }
+      case 'detectBalanceLate': {
+        const payload = detectLateNarrowing(req.balance, req.files, req.plantId, req.day, req.analyses, nowMs(), req.createdBy);
         post({ id: req.id, ok: true, type: req.type, payload, tookMs: nowMs() - started });
         break;
       }

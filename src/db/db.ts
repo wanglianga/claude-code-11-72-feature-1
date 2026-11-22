@@ -24,6 +24,17 @@ import type {
   RecalcCandidate,
   StatePeriod,
 } from '../domain/types';
+import type {
+  BalanceAnalysis,
+  BoundaryStream,
+  LevelRecord,
+  MeterSpec,
+  ProcessRecord,
+  ProcessUnit,
+  PumpSwitch,
+  RemovalParam,
+  StreamReading,
+} from '../domain/balance/types';
 
 export interface AuditEntry {
   auditId: string;
@@ -51,12 +62,25 @@ interface StoreSchema extends DBSchema {
   declarations: { key: string; value: Declaration; indexes: { 'by-point-day': string } };
   recalc: { key: string; value: RecalcCandidate; indexes: { 'by-declaration': string; 'by-point-day': string } };
   audits: { key: string; value: AuditEntry };
+  processUnits: { key: string; value: ProcessUnit };
+  boundaryStreams: { key: string; value: BoundaryStream; indexes: { 'by-plant': string } };
+  meterSpecs: { key: string; value: MeterSpec };
+  streamReadings: {
+    key: string;
+    value: StreamReading;
+    indexes: { 'by-day': string; 'by-stream': string; 'by-file': string };
+  };
+  levelRecords: { key: string; value: LevelRecord; indexes: { 'by-unit': string } };
+  processRecords: { key: string; value: ProcessRecord; indexes: { 'by-unit': string } };
+  pumpSwitches: { key: string; value: PumpSwitch };
+  removalParams: { key: string; value: RemovalParam };
+  balanceAnalyses: { key: string; value: BalanceAnalysis; indexes: { 'by-plant-day': string } };
 }
 
 type FileKind = IntakeFile['kind'];
 
 export const DB_NAME = 'outfall-review';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 export const SCHEMA_KEY = 'schemaVersion';
 export const SAMPLE_KEY = 'sampleImported';
 
@@ -67,31 +91,52 @@ let dbPromise: Promise<ReviewDB> | null = null;
 export function getDb(): Promise<ReviewDB> {
   if (!dbPromise) {
     dbPromise = openDB<StoreSchema>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        db.createObjectStore('meta');
-        const intake = db.createObjectStore('intake', { keyPath: 'fileId' });
-        intake.createIndex('by-kind', 'kind');
-        db.createObjectStore('plants', { keyPath: 'plantId' });
-        const points = db.createObjectStore('points', { keyPath: 'pointCode' });
-        points.createIndex('by-plant', 'plantId');
-        const instruments = db.createObjectStore('instruments', { keyPath: 'instrumentId' });
-        instruments.createIndex('by-point', 'pointCode');
-        const calibrations = db.createObjectStore('calibrations', { keyPath: 'calibrationId' });
-        calibrations.createIndex('by-instrument', 'instrumentId');
-        const states = db.createObjectStore('states', { keyPath: 'stateId' });
-        states.createIndex('by-instrument', 'instrumentId');
-        const bindings = db.createObjectStore('bindings', { keyPath: 'bindingId' });
-        bindings.createIndex('by-point', 'pointCode');
-        const readings = db.createObjectStore('readings', { keyPath: 'readingId' });
-        readings.createIndex('by-point-day', 'dayKey');
-        readings.createIndex('by-instrument', 'instrumentId');
-        readings.createIndex('by-file', 'sourceFileId');
-        const declarations = db.createObjectStore('declarations', { keyPath: 'declarationId' });
-        declarations.createIndex('by-point-day', 'day');
-        const recalc = db.createObjectStore('recalc', { keyPath: 'candidateId' });
-        recalc.createIndex('by-declaration', 'declarationId');
-        recalc.createIndex('by-point-day', 'day');
-        db.createObjectStore('audits', { keyPath: 'auditId' });
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore('meta');
+          const intake = db.createObjectStore('intake', { keyPath: 'fileId' });
+          intake.createIndex('by-kind', 'kind');
+          db.createObjectStore('plants', { keyPath: 'plantId' });
+          const points = db.createObjectStore('points', { keyPath: 'pointCode' });
+          points.createIndex('by-plant', 'plantId');
+          const instruments = db.createObjectStore('instruments', { keyPath: 'instrumentId' });
+          instruments.createIndex('by-point', 'pointCode');
+          const calibrations = db.createObjectStore('calibrations', { keyPath: 'calibrationId' });
+          calibrations.createIndex('by-instrument', 'instrumentId');
+          const states = db.createObjectStore('states', { keyPath: 'stateId' });
+          states.createIndex('by-instrument', 'instrumentId');
+          const bindings = db.createObjectStore('bindings', { keyPath: 'bindingId' });
+          bindings.createIndex('by-point', 'pointCode');
+          const readings = db.createObjectStore('readings', { keyPath: 'readingId' });
+          readings.createIndex('by-point-day', 'dayKey');
+          readings.createIndex('by-instrument', 'instrumentId');
+          readings.createIndex('by-file', 'sourceFileId');
+          const declarations = db.createObjectStore('declarations', { keyPath: 'declarationId' });
+          declarations.createIndex('by-point-day', 'day');
+          const recalc = db.createObjectStore('recalc', { keyPath: 'candidateId' });
+          recalc.createIndex('by-declaration', 'declarationId');
+          recalc.createIndex('by-point-day', 'day');
+          db.createObjectStore('audits', { keyPath: 'auditId' });
+        }
+        if (oldVersion < 2) {
+          // 工艺段平衡分析：边界登记、不确定度库、支路读数、液位、工艺记录、分析版本
+          db.createObjectStore('processUnits', { keyPath: 'unitId' });
+          const streams = db.createObjectStore('boundaryStreams', { keyPath: 'streamId' });
+          streams.createIndex('by-plant', 'plantId');
+          db.createObjectStore('meterSpecs', { keyPath: 'meterId' });
+          const streamReadings = db.createObjectStore('streamReadings', { keyPath: 'readingId' });
+          streamReadings.createIndex('by-day', 'dayKey');
+          streamReadings.createIndex('by-stream', 'streamId');
+          streamReadings.createIndex('by-file', 'sourceFileId');
+          const levels = db.createObjectStore('levelRecords', { keyPath: 'recordId' });
+          levels.createIndex('by-unit', 'unitId');
+          const processRecords = db.createObjectStore('processRecords', { keyPath: 'recordId' });
+          processRecords.createIndex('by-unit', 'unitId');
+          db.createObjectStore('pumpSwitches', { keyPath: 'switchId' });
+          db.createObjectStore('removalParams', { keyPath: 'paramId' });
+          const analyses = db.createObjectStore('balanceAnalyses', { keyPath: 'analysisId' });
+          analyses.createIndex('by-plant-day', 'day');
+        }
       },
       blocked() {
         console.warn('IndexedDB 升级被其他标签页阻塞');
@@ -136,6 +181,15 @@ export async function clearAll(): Promise<void> {
     'recalc',
     'audits',
     'meta',
+    'processUnits',
+    'boundaryStreams',
+    'meterSpecs',
+    'streamReadings',
+    'levelRecords',
+    'processRecords',
+    'pumpSwitches',
+    'removalParams',
+    'balanceAnalyses',
   ] as const;
   const tx = db.transaction(names, 'readwrite');
   await Promise.all(names.map((n) => tx.objectStore(n).clear()));
@@ -309,4 +363,95 @@ export async function intakeFiles(): Promise<IntakeFile[]> {
 export async function currentSchema(): Promise<number> {
   const db = await getDb();
   return db.version;
+}
+
+/* ---------------- 工艺段平衡分析 ---------------- */
+
+export async function putBalanceBatch(data: {
+  units?: ProcessUnit[];
+  streams?: BoundaryStream[];
+  meters?: MeterSpec[];
+  levels?: LevelRecord[];
+  processRecords?: ProcessRecord[];
+  pumpSwitches?: PumpSwitch[];
+  removalParams?: RemovalParam[];
+}): Promise<void> {
+  const db = await getDb();
+  const mapping: [keyof typeof data, string][] = [
+    ['units', 'processUnits'],
+    ['streams', 'boundaryStreams'],
+    ['meters', 'meterSpecs'],
+    ['levels', 'levelRecords'],
+    ['processRecords', 'processRecords'],
+    ['pumpSwitches', 'pumpSwitches'],
+    ['removalParams', 'removalParams'],
+  ];
+  const stores = [...new Set(mapping.filter(([k]) => (data[k] as unknown[] | undefined)?.length).map(([, s]) => s))];
+  if (stores.length === 0) return;
+  const tx = db.transaction(stores as never, 'readwrite');
+  for (const [key, store] of mapping) {
+    const list = data[key] as unknown[] | undefined;
+    if (!list?.length) continue;
+    for (const item of list) await tx.objectStore(store as never).put(item as never);
+  }
+  await tx.done;
+}
+
+export async function putStreamReadingsInChunks(readings: StreamReading[], chunkSize = 4000): Promise<void> {
+  const db = await getDb();
+  for (let i = 0; i < readings.length; i += chunkSize) {
+    const chunk = readings.slice(i, i + chunkSize);
+    const tx = db.transaction('streamReadings', 'readwrite');
+    for (const r of chunk) await tx.store.put(r);
+    await tx.done;
+  }
+}
+
+export async function getAllBalance(): Promise<{
+  units: ProcessUnit[];
+  streams: BoundaryStream[];
+  meters: MeterSpec[];
+  readings: StreamReading[];
+  levels: LevelRecord[];
+  processRecords: ProcessRecord[];
+  pumpSwitches: PumpSwitch[];
+  removalParams: RemovalParam[];
+}> {
+  const db = await getDb();
+  const [units, streams, meters, readings, levels, processRecords, pumpSwitches, removalParams] = await Promise.all([
+    db.getAll('processUnits'),
+    db.getAll('boundaryStreams'),
+    db.getAll('meterSpecs'),
+    db.getAll('streamReadings'),
+    db.getAll('levelRecords'),
+    db.getAll('processRecords'),
+    db.getAll('pumpSwitches'),
+    db.getAll('removalParams'),
+  ]);
+  return { units, streams, meters, readings, levels, processRecords, pumpSwitches, removalParams };
+}
+
+export async function listBalanceAnalyses(): Promise<BalanceAnalysis[]> {
+  const db = await getDb();
+  const all = await db.getAll('balanceAnalyses');
+  return all.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/** 分析版本只新增不改写；复核动作以整体替换形式写回（状态 OPEN → REVIEWED，结果体不变） */
+export async function saveBalanceAnalysis(analysis: BalanceAnalysis): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(['balanceAnalyses', 'audits'], 'readwrite');
+  const existing = await tx.objectStore('balanceAnalyses').get(analysis.analysisId);
+  await tx.objectStore('balanceAnalyses').put(analysis);
+  await tx.objectStore('audits').put({
+    auditId: `audit-${analysis.createdAt}-${Math.random().toString(36).slice(2, 8)}`,
+    at: analysis.createdAt,
+    actor: analysis.createdBy,
+    action: existing ? 'BALANCE_REVIEWED' : 'BALANCE_CREATED',
+    detail: existing
+      ? `复核平衡分析 ${analysis.analysisId}（${analysis.plantId} ${analysis.day}）：${analysis.review?.causes.join('、') ?? '—'}`
+      : `生成平衡分析 ${analysis.analysisId}（${analysis.plantId} ${analysis.day}，${analysis.trigger}）`,
+    refIds: [analysis.analysisId, ...(analysis.supersedesId ? [analysis.supersedesId] : [])],
+  });
+  await tx.done;
 }

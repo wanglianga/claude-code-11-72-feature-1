@@ -36,7 +36,7 @@ export function OverviewPage({ state, actions, onNavigate }: Props) {
             </p>
             <div className="row" style={{ justifyContent: 'center' }}>
               <button className="btn primary" onClick={() => void actions.loadSample()} disabled={state.loading}>
-                装载样例资料（三厂四排口 · 35,346 行）
+                装载样例资料（三厂四排口 ＋ 工艺段平衡 · 约 4.0 万行）
               </button>
               <button className="btn" onClick={() => void actions.recompute()} disabled={dataset.readings.length === 0}>
                 重新计算
@@ -137,6 +137,45 @@ export function OverviewPage({ state, actions, onNavigate }: Props) {
               </div>
             </div>
           </div>
+
+          {state.balanceResult && (
+            <div className="card">
+              <div className="card-head">
+                <h2>工艺段平衡 · {state.balancePlantId} · {state.balanceDay}</h2>
+                <span className="sub">进出水日负荷差异的平衡分解（水量 / 示踪 / 去除）</span>
+                <div className="spacer" />
+                <button className="btn small" onClick={() => onNavigate('balance')}>
+                  打开平衡分析 →
+                </button>
+              </div>
+              <div className="card-pad">
+                <div className="grid cols-4">
+                  <div className="card stat">
+                    <div className="stat-label">水量残差</div>
+                    <div className="stat-value small">{fmtNum(state.balanceResult.plant.water.residual.best, 0)} m³</div>
+                    <div className="stat-foot">区间 {fmtNum(state.balanceResult.plant.water.residual.min, 0)} – {fmtNum(state.balanceResult.plant.water.residual.max, 0)}</div>
+                  </div>
+                  <div className="card stat">
+                    <div className="stat-label">示踪残差</div>
+                    <div className="stat-value small">{fmtNum(state.balanceResult.plant.tracer.residual.best, 1)} kg</div>
+                    <div className="stat-foot">区间 {fmtNum(state.balanceResult.plant.tracer.residual.min, 1)} – {fmtNum(state.balanceResult.plant.tracer.residual.max, 1)}</div>
+                  </div>
+                  {state.balanceResult.plant.removal.map((rem) => (
+                    <div className="card stat" key={rem.pollutant}>
+                      <div className="stat-label">{rem.pollutant === 'COD' ? 'COD' : '氨氮'} 不可解释残差</div>
+                      <div className="stat-value small">{fmtNum(rem.unexplained.best, 1)} kg</div>
+                      <div className="stat-foot">观测 {fmtNum(rem.observed.best, 0)} / 支持 {fmtNum(rem.supported.best, 0)} kg</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="row" style={{ marginTop: 10, flexWrap: 'wrap', gap: 6 }}>
+                  {state.balanceResult.suggestedCauses.slice(0, 4).map((s, i) => (
+                    <span key={i} className="badge info">{s.evidence.slice(0, 34)}…</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="card">
             <div className="card-head">

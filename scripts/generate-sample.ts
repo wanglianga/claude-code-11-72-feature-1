@@ -30,6 +30,16 @@ import type {
   SampleManifest,
   StatePeriod,
 } from '../src/domain/types';
+import type {
+  BoundaryStream,
+  LevelRecord,
+  MeterSpec,
+  ProcessRecord,
+  ProcessUnit,
+  PumpSwitch,
+  RemovalParam,
+  StreamReading,
+} from '../src/domain/balance/types';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const outDir = resolve(__dirname, '../public/sample');
@@ -697,6 +707,362 @@ function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+/* ================= 工艺段平衡分析样例（P1，2026-11-18） =================
+ *
+ * 故事线（全部确定性，无随机数）：
+ * - 反冲洗 14:00–15:20（450 m³/h，共 600 m³）回流水在进水计量点上游汇入主线，
+ *   其流量计与浓度计在基础批次中缺测（遥测中断），补传文件次日 16:40 到达；
+ * - 生化池液位 08:00–12:00 上升 0.4 m（+800 m³ 存量），夜间回落，净 ΔV +100 m³；
+ * - 22:30–23:30 进水升高（流量/COD/示踪同步），全厂滞后带 150–260 min，
+ *   到达出水已是次日 01:00 之后 → 保持“在途”，不强行配对；
+ * - 08:30–09:30 进水 COD 抬升，出水 12:00–13:30 出现滞后响应（允许配对）；
+ * - 回流泵 P-R1 11:00 由 S-RET-A 切换至 S-RET-B（内部循环，从主线拆出）；
+ * - 旁通支路 S-BYP 2026-11-20 起停用（2026-11-22 登记确认），不改写 11-18 平衡；
+ * - 各仪表带确定性偏差（均在证书 k=2 区间内），供路径 B 协调定位。
+ */
+
+const B_RECEIVED = at(0) + 30 * HOUR + 10 * MIN; // 台账 2026-11-19 06:10+08
+const B_READINGS_RECEIVED = BASE_RECEIVED; // 支路读数随基础批次
+const B_LATE_RECEIVED = LATE_RECEIVED; // 补传与迟到读数同批到达
+
+const balanceUnits: ProcessUnit[] = [
+  { unitId: 'U1', plantId: 'P1', name: '初沉池', kind: 'PRIMARY_CLARIFIER', surfaceAreaM2: 800, lagMinMinutes: 20, lagMaxMinutes: 40, note: '无液位计，存量变化按 0 处理并披露。' },
+  { unitId: 'U2', plantId: 'P1', name: '生化池(A²/O)', kind: 'BIOREACTOR', surfaceAreaM2: 2000, lagMinMinutes: 90, lagMaxMinutes: 150, note: '曝气与排泥记录所在单元；液位计 L-U2。' },
+  { unitId: 'U3', plantId: 'P1', name: '二沉池', kind: 'SECONDARY_CLARIFIER', surfaceAreaM2: 1200, lagMinMinutes: 30, lagMaxMinutes: 50, note: '回流污泥自本单元抽出；液位计 L-U3。' },
+  { unitId: 'U4', plantId: 'P1', name: '深度处理(高效沉淀+滤池)', kind: 'TERTIARY', surfaceAreaM2: 400, lagMinMinutes: 10, lagMaxMinutes: 20, note: '反冲洗水回流至厂首；投药记录所在单元。' },
+];
+
+const balanceStreams: BoundaryStream[] = [
+  { streamId: 'S-IN', plantId: 'P1', unitId: 'U1', kind: 'IN', flowMeterId: 'M-QIN', internal: false, effectiveFrom: at(0) - 300 * 24 * HOUR, effectiveTo: null, registeredAt: B_RECEIVED, gapFlowLowM3h: 0, gapFlowHighM3h: 0, gapConcLowMgL: { TRACER: 0, COD: 0, NH3N: 0 }, gapConcHighMgL: { TRACER: 0, COD: 0, NH3N: 0 }, note: '总进水计量点位于反冲洗回流水汇入点下游，测量值含回流水。' },
+  { streamId: 'S-OUT', plantId: 'P1', unitId: 'U4', kind: 'OUT', flowMeterId: 'M-QOUT', internal: false, effectiveFrom: at(0) - 300 * 24 * HOUR, effectiveTo: null, registeredAt: B_RECEIVED, gapFlowLowM3h: 0, gapFlowHighM3h: 0, gapConcLowMgL: { TRACER: 0, COD: 0, NH3N: 0 }, gapConcHighMgL: { TRACER: 0, COD: 0, NH3N: 0 }, note: '总出水（厂界）。' },
+  { streamId: 'S-RET-A', plantId: 'P1', unitId: 'U3', kind: 'RETURN', flowMeterId: 'M-QR1', internal: true, effectiveFrom: at(0) - 300 * 24 * HOUR, effectiveTo: at(11), registeredAt: B_RECEIVED, gapFlowLowM3h: 0, gapFlowHighM3h: 0, gapConcLowMgL: { TRACER: 0, COD: 0, NH3N: 0 }, gapConcHighMgL: { TRACER: 0, COD: 0, NH3N: 0 }, note: '回流污泥至生化池前端（11:00 前）。' },
+  { streamId: 'S-RET-B', plantId: 'P1', unitId: 'U3', kind: 'RETURN', flowMeterId: 'M-QR1', internal: true, effectiveFrom: at(11), effectiveTo: null, registeredAt: B_RECEIVED, gapFlowLowM3h: 0, gapFlowHighM3h: 0, gapConcLowMgL: { TRACER: 0, COD: 0, NH3N: 0 }, gapConcHighMgL: { TRACER: 0, COD: 0, NH3N: 0 }, note: '回流污泥至生化池缺氧段（11:00 起，泵切换后）。' },
+  { streamId: 'S-SL1', plantId: 'P1', unitId: 'U1', kind: 'SLUDGE', flowMeterId: 'M-QS1', internal: false, effectiveFrom: at(0) - 300 * 24 * HOUR, effectiveTo: null, registeredAt: B_RECEIVED, gapFlowLowM3h: 0, gapFlowHighM3h: 0, gapConcLowMgL: { TRACER: 0, COD: 0, NH3N: 0 }, gapConcHighMgL: { TRACER: 0, COD: 0, NH3N: 0 }, note: '初沉排泥（06:00–06:30、18:00–18:30）。' },
+  { streamId: 'S-SL2', plantId: 'P1', unitId: 'U3', kind: 'SLUDGE', flowMeterId: 'M-QS2', internal: false, effectiveFrom: at(0) - 300 * 24 * HOUR, effectiveTo: null, registeredAt: B_RECEIVED, gapFlowLowM3h: 0, gapFlowHighM3h: 0, gapConcLowMgL: { TRACER: 0, COD: 0, NH3N: 0 }, gapConcHighMgL: { TRACER: 0, COD: 0, NH3N: 0 }, note: '剩余污泥排放（20:00–20:40）。' },
+  { streamId: 'S-BW', plantId: 'P1', unitId: 'U4', kind: 'BACKWASH', flowMeterId: 'M-QBW', internal: true, effectiveFrom: at(0) - 300 * 24 * HOUR, effectiveTo: null, registeredAt: B_RECEIVED, gapFlowLowM3h: 0, gapFlowHighM3h: 450, gapConcLowMgL: { TRACER: 150, COD: 80, NH3N: 5 }, gapConcHighMgL: { TRACER: 200, COD: 260, NH3N: 20 }, note: '反冲洗水回流至厂首（进水计量点上游）；缺测时按泵额定 0–450 m³/h、浓度 80–260 mg/L 登记估计。' },
+  { streamId: 'S-BYP', plantId: 'P1', unitId: 'U1', kind: 'OUT', flowMeterId: null, internal: false, effectiveFrom: at(0) - 300 * 24 * HOUR, effectiveTo: at(0) + 2 * 24 * HOUR, registeredAt: Date.UTC(2026, 10, 22, 1, 0, 0), gapFlowLowM3h: 0, gapFlowHighM3h: 0, gapConcLowMgL: { TRACER: 0, COD: 0, NH3N: 0 }, gapConcHighMgL: { TRACER: 0, COD: 0, NH3N: 0 }, note: '应急旁通（无量计，常年零流量）；2026-11-20 起停用，2026-11-22 登记确认，不改写 11-18 平衡。' },
+];
+
+const balanceMeters: MeterSpec[] = [
+  { meterId: 'M-QIN', metric: 'FLOW', label: '总进水流量计', relSigma: 0.01, absSigma: 2, calGroup: 'CG-FLOW-2026Q4', groupCorrelation: 0.5, adjustLimitRel: 0.03, certificate: 'CC-2026-10-01-FLOW-01', validFrom: at(0) - 48 * 24 * HOUR, validTo: null, note: '与 M-QOUT/M-QR1/M-QBW 同批次率定，误差相关 ρ=0.5。' },
+  { meterId: 'M-QOUT', metric: 'FLOW', label: '总出水流量计', relSigma: 0.01, absSigma: 2, calGroup: 'CG-FLOW-2026Q4', groupCorrelation: 0.5, adjustLimitRel: 0.03, certificate: 'CC-2026-10-01-FLOW-02', validFrom: at(0) - 48 * 24 * HOUR, validTo: null, note: '同 CG-FLOW-2026Q4。' },
+  { meterId: 'M-QR1', metric: 'FLOW', label: '回流泵流量计', relSigma: 0.015, absSigma: 1, calGroup: 'CG-FLOW-2026Q4', groupCorrelation: 0.5, adjustLimitRel: 0.04, certificate: 'CC-2026-10-01-FLOW-03', validFrom: at(0) - 48 * 24 * HOUR, validTo: null, note: '回流泵 P-R1 出线计量。' },
+  { meterId: 'M-QS1', metric: 'FLOW', label: '初沉排泥流量计', relSigma: 0.025, absSigma: 0.5, calGroup: 'CG-SLUDGE-2026Q4', groupCorrelation: 0.4, adjustLimitRel: 0.06, certificate: 'CC-2026-10-02-SLD-01', validFrom: at(0) - 46 * 24 * HOUR, validTo: null, note: '间歇运行。' },
+  { meterId: 'M-QS2', metric: 'FLOW', label: '剩余污泥流量计', relSigma: 0.025, absSigma: 0.5, calGroup: 'CG-SLUDGE-2026Q4', groupCorrelation: 0.4, adjustLimitRel: 0.06, certificate: 'CC-2026-10-02-SLD-02', validFrom: at(0) - 46 * 24 * HOUR, validTo: null, note: '间歇运行。' },
+  { meterId: 'M-QBW', metric: 'FLOW', label: '反冲洗回流流量计', relSigma: 0.02, absSigma: 1, calGroup: 'CG-FLOW-2026Q4', groupCorrelation: 0.5, adjustLimitRel: 0.05, certificate: 'CC-2026-10-01-FLOW-04', validFrom: at(0) - 48 * 24 * HOUR, validTo: null, note: '14:00–15:20 遥测中断（基础批次缺测，补传到达）。' },
+  { meterId: 'M-TIN', metric: 'TRACER', label: '进水氯离子仪', relSigma: 0.015, absSigma: 1, calGroup: 'CG-TRACER-202611', groupCorrelation: 0.5, adjustLimitRel: 0.04, certificate: 'CC-2026-11-01-TRC-01', validFrom: at(0) - 17 * 24 * HOUR, validTo: null, note: '与 M-TOUT/M-TBW 共用标准物质。' },
+  { meterId: 'M-TOUT', metric: 'TRACER', label: '出水氯离子仪', relSigma: 0.015, absSigma: 1, calGroup: 'CG-TRACER-202611', groupCorrelation: 0.5, adjustLimitRel: 0.04, certificate: 'CC-2026-11-01-TRC-02', validFrom: at(0) - 17 * 24 * HOUR, validTo: null, note: '同 CG-TRACER-202611。' },
+  { meterId: 'M-TBW', metric: 'TRACER', label: '反冲洗水氯离子仪', relSigma: 0.015, absSigma: 1, calGroup: 'CG-TRACER-202611', groupCorrelation: 0.5, adjustLimitRel: 0.04, certificate: 'CC-2026-11-01-TRC-03', validFrom: at(0) - 17 * 24 * HOUR, validTo: null, note: '同 CG-TRACER-202611。' },
+  { meterId: 'M-CIN', metric: 'COD', label: '进水 COD 仪', relSigma: 0.02, absSigma: 2, calGroup: 'CG-COD-202611', groupCorrelation: 0.5, adjustLimitRel: 0.05, certificate: 'CC-2026-11-02-COD-01', validFrom: at(0) - 16 * 24 * HOUR, validTo: null, note: '与 M-COUT/M-CBW 共用标准液。' },
+  { meterId: 'M-COUT', metric: 'COD', label: '出水 COD 仪', relSigma: 0.02, absSigma: 1, calGroup: 'CG-COD-202611', groupCorrelation: 0.5, adjustLimitRel: 0.05, certificate: 'CC-2026-11-02-COD-02', validFrom: at(0) - 16 * 24 * HOUR, validTo: null, note: '同 CG-COD-202611。' },
+  { meterId: 'M-CBW', metric: 'COD', label: '反冲洗水 COD 仪', relSigma: 0.02, absSigma: 2, calGroup: 'CG-COD-202611', groupCorrelation: 0.5, adjustLimitRel: 0.05, certificate: 'CC-2026-11-02-COD-03', validFrom: at(0) - 16 * 24 * HOUR, validTo: null, note: '同 CG-COD-202611。' },
+  { meterId: 'M-NIN', metric: 'NH3N', label: '进水氨氮仪', relSigma: 0.025, absSigma: 0.3, calGroup: 'CG-NH3N-202611', groupCorrelation: 0.5, adjustLimitRel: 0.06, certificate: 'CC-2026-11-03-NHN-01', validFrom: at(0) - 15 * 24 * HOUR, validTo: null, note: '与 M-NOUT/M-NBW 共用标准液。' },
+  { meterId: 'M-NOUT', metric: 'NH3N', label: '出水氨氮仪', relSigma: 0.025, absSigma: 0.2, calGroup: 'CG-NH3N-202611', groupCorrelation: 0.5, adjustLimitRel: 0.06, certificate: 'CC-2026-11-03-NHN-02', validFrom: at(0) - 15 * 24 * HOUR, validTo: null, note: '同 CG-NH3N-202611。' },
+  { meterId: 'M-NBW', metric: 'NH3N', label: '反冲洗水氨氮仪', relSigma: 0.025, absSigma: 0.3, calGroup: 'CG-NH3N-202611', groupCorrelation: 0.5, adjustLimitRel: 0.06, certificate: 'CC-2026-11-03-NHN-03', validFrom: at(0) - 15 * 24 * HOUR, validTo: null, note: '同 CG-NH3N-202611。' },
+  { meterId: 'L-U2', metric: 'FLOW', label: '生化池液位计(→ΔV)', relSigma: 0, absSigma: 28, calGroup: 'CG-LEVEL', groupCorrelation: 0, adjustLimitRel: 0.5, certificate: 'CC-2026-10-05-LVL-01', validFrom: at(0) - 44 * 24 * HOUR, validTo: null, note: 'absSigma 已折算为体积：±0.01 m × √2 × 2000 m² ≈ 28 m³。' },
+  { meterId: 'L-U3', metric: 'FLOW', label: '二沉池液位计(→ΔV)', relSigma: 0, absSigma: 17, calGroup: 'CG-LEVEL', groupCorrelation: 0, adjustLimitRel: 0.5, certificate: 'CC-2026-10-05-LVL-02', validFrom: at(0) - 44 * 24 * HOUR, validTo: null, note: 'absSigma 已折算为体积：±0.01 m × √2 × 1200 m² ≈ 17 m³。' },
+];
+
+const balanceParams: RemovalParam[] = [
+  { paramId: 'RP-O2-KG-M3AIR', unitId: null, pollutant: 'COD', param: '每 m³ 空气理论供氧量', low: 0.3, high: 0.3, unit: 'kgO₂/m³', note: '0.21 × 1.429 kg/m³。' },
+  { paramId: 'RP-ETA-O2', unitId: 'U2', pollutant: 'COD', param: '氧转移效率', low: 0.28, high: 0.42, unit: '-', note: '微孔曝气典型范围（台账登记）。' },
+  { paramId: 'RP-NIT-FRAC', unitId: 'U2', pollutant: 'NH3N', param: '供氧分配硝化比例', low: 0.3, high: 0.42, unit: '-', note: '按进水 C/N 与历史运行登记。' },
+  { paramId: 'RP-NIT-O2', unitId: null, pollutant: 'NH3N', param: '硝化需氧量', low: 4.57, high: 4.57, unit: 'kgO₂/kgN', note: '理论值。' },
+  { paramId: 'RP-COD-PER-O2', unitId: 'U2', pollutant: 'COD', param: '碳氧化系数', low: 0.85, high: 1.1, unit: 'kgCOD/kgO₂', note: '含内源呼吸修正。' },
+  { paramId: 'RP-SLUDGE-TSS', unitId: null, pollutant: 'COD', param: '排泥含固浓度', low: 7, high: 9, unit: 'kgTSS/m³', note: '排泥浓度化验登记范围。' },
+  { paramId: 'RP-SLUDGE-CODRATIO', unitId: null, pollutant: 'COD', param: '污泥 COD/TSS 比', low: 1, high: 1.4, unit: 'kgCOD/kgTSS', note: '污泥成分化验登记范围。' },
+  { paramId: 'RP-PAC-COD', unitId: 'U4', pollutant: 'COD', param: '混凝剂单位去除', low: 0.15, high: 0.35, unit: 'kgCOD/kg', note: 'PAC 投加化学沉淀去除。' },
+  { paramId: 'RP-DO-MIN', unitId: 'U2', pollutant: 'COD', param: '好氧去除最低溶解氧', low: 1, high: 1, unit: 'mg/L', note: '低于此值好氧去除折减。' },
+];
+
+const balanceSwitches: PumpSwitch[] = [
+  { switchId: 'SW-001', pumpId: 'P-R1', at: at(11), fromStreamId: 'S-RET-A', toStreamId: 'S-RET-B', reason: '缺氧段碳源分配优化，回流点切换', workOrder: 'WO-118-021' },
+];
+
+/** 仪表确定性偏差（均在证书 k=2 区间内），供路径 B 协调定位 */
+const METER_BIAS: Record<string, number> = {
+  'M-QIN': 1.015, 'M-QOUT': 0.99, 'M-QR1': 0.985, 'M-QS1': 1.0, 'M-QS2': 0.98, 'M-QBW': 1.02,
+  'M-TIN': 1.005, 'M-TOUT': 0.995, 'M-TBW': 1.0,
+  'M-CIN': 1.02, 'M-COUT': 0.98, 'M-CBW': 1.015,
+  'M-NIN': 1.0, 'M-NOUT': 1.03, 'M-NBW': 1.0,
+};
+
+function bump(h: number, start: number, dur: number): number {
+  return h >= start && h <= start + dur ? Math.sin((Math.PI * (h - start)) / dur) : 0;
+}
+
+function qExt(h: number): number {
+  return 430 + 70 * Math.sin((2 * Math.PI * (h - 9)) / 24) + 70 * bump(h, 22.5, 1);
+}
+function qBw(h: number): number {
+  return h >= 14 && h < 14 + 4 / 3 ? 450 : 0;
+}
+function qSl1(h: number): number {
+  return (h >= 6 && h < 6.5) || (h >= 18 && h < 18.5) ? 60 : 0;
+}
+function qSl2(h: number): number {
+  return h >= 20 && h < 20 + 2 / 3 ? 45 : 0;
+}
+function dv2dt(h: number): number {
+  if (h >= 8 && h < 12) return 200;
+  if (h >= 12 && h < 20) return -87.5;
+  if (h >= 22.5 && h <= 23.5) return 70 * bump(h, 22.5, 1); // 夜间冲击水全部滞留池内
+  return 0;
+}
+function dv3dt(h: number): number {
+  return 0.02 * Math.cos((2 * Math.PI * h) / 24) * ((2 * Math.PI) / 24) * 1200;
+}
+function qOut(h: number): number {
+  return qExt(h) - qSl1(h) - qSl2(h) - dv2dt(h) - dv3dt(h);
+}
+function qRet(h: number): number {
+  return 180 + 20 * Math.sin((2 * Math.PI * (h - 6)) / 24);
+}
+function cCodExt(h: number): number {
+  return 310 + 60 * Math.sin((2 * Math.PI * (h - 8)) / 24) + 90 * bump(h, 8.5, 1) + 220 * bump(h, 22.5, 1);
+}
+function cCodBw(h: number): number {
+  return qBw(h) > 0 ? 160 + 30 * Math.sin((2 * Math.PI * (h - 14)) / 1.33) : 25;
+}
+function cTrExt(h: number): number {
+  return 180 + 25 * Math.sin((2 * Math.PI * (h - 7)) / 24) + 80 * bump(h, 22.5, 1);
+}
+function cTrBw(h: number): number {
+  return qBw(h) > 0 ? 175 : 150;
+}
+function cNhExt(h: number): number {
+  return 30 + 4 * Math.sin((2 * Math.PI * (h - 8)) / 24);
+}
+function cNhBw(h: number): number {
+  return qBw(h) > 0 ? 12 : 3;
+}
+/** 进水混合浓度：外部进水与反冲洗回流水在计量点上游混合 */
+function mixed(h: number, cExt: number, cBw: number): number {
+  const qe = qExt(h);
+  const qb = qBw(h);
+  if (qb <= 0) return cExt;
+  return (qe * cExt + qb * cBw) / (qe + qb);
+}
+function cTrOut(h: number): number {
+  const hs = Math.max(0, h - 3.5);
+  return 0.998 * mixed(hs, cTrExt(hs), cTrBw(hs));
+}
+function cCodOut(h: number): number {
+  return 26 + 4 * Math.sin((2 * Math.PI * (h - 14)) / 24) + 8 * bump(h, 12, 1.5);
+}
+function cNhOut(h: number): number {
+  return 1.8 + 0.5 * Math.sin((2 * Math.PI * (h - 13)) / 24);
+}
+function levelU2(h: number): number {
+  if (h < 8) return 3.1;
+  if (h < 12) return 3.1 + 0.1 * (h - 8);
+  if (h < 20) return 3.5 - 0.04375 * (h - 12);
+  if (h < 22.5) return 3.15;
+  if (h <= 23.5) return 3.15 + ((70 / Math.PI) * (1 - Math.cos(Math.PI * (h - 22.5)))) / 2000;
+  return 3.172;
+}
+function levelU3(h: number): number {
+  return 2.8 + 0.02 * Math.sin((2 * Math.PI * h) / 24);
+}
+
+interface BalanceFile {
+  fileName: string;
+  kind: SampleManifest['baseFiles'][number]['kind'];
+  receivedAt: number;
+  text: string;
+  note: string;
+}
+
+function generateBalanceFiles(): { files: BalanceFile[]; lateFile: BalanceFile } {
+  const files: BalanceFile[] = [];
+  files.push({
+    fileName: 'process_units.csv',
+    kind: 'PROCESS_UNIT_REGISTER',
+    receivedAt: B_RECEIVED,
+    note: '工艺单元登记：水面面积与可达滞后时间带',
+    text: serializeCsv(
+      ['unit_id', 'plant_id', 'name', 'kind', 'surface_area_m2', 'lag_min_minutes', 'lag_max_minutes', 'note'],
+      balanceUnits.map((u) => ({
+        unit_id: u.unitId, plant_id: u.plantId, name: u.name, kind: u.kind,
+        surface_area_m2: u.surfaceAreaM2, lag_min_minutes: u.lagMinMinutes, lag_max_minutes: u.lagMaxMinutes, note: u.note,
+      })),
+    ),
+  });
+  files.push({
+    fileName: 'boundary_streams.csv',
+    kind: 'BOUNDARY_STREAM_REGISTER',
+    receivedAt: B_RECEIVED,
+    note: '边界流登记：进出水/回流/排泥/反冲洗/旁通，含支路有效期与缺测估计',
+    text: serializeCsv(
+      ['stream_id', 'plant_id', 'unit_id', 'kind', 'flow_meter_id', 'internal', 'effective_from', 'effective_to', 'registered_at', 'gap_flow_low_m3h', 'gap_flow_high_m3h', 'gap_conc_tracer_low_mg_l', 'gap_conc_tracer_high_mg_l', 'gap_conc_cod_low_mg_l', 'gap_conc_cod_high_mg_l', 'gap_conc_nh3n_low_mg_l', 'gap_conc_nh3n_high_mg_l', 'note'],
+      balanceStreams.map((s) => ({
+        stream_id: s.streamId, plant_id: s.plantId, unit_id: s.unitId, kind: s.kind,
+        flow_meter_id: s.flowMeterId ?? '', internal: s.internal ? 'true' : 'false',
+        effective_from: isoLocal(s.effectiveFrom), effective_to: s.effectiveTo === null ? '' : isoLocal(s.effectiveTo),
+        registered_at: isoLocal(s.registeredAt),
+        gap_flow_low_m3h: s.gapFlowLowM3h, gap_flow_high_m3h: s.gapFlowHighM3h,
+        gap_conc_tracer_low_mg_l: s.gapConcLowMgL.TRACER, gap_conc_tracer_high_mg_l: s.gapConcHighMgL.TRACER,
+        gap_conc_cod_low_mg_l: s.gapConcLowMgL.COD, gap_conc_cod_high_mg_l: s.gapConcHighMgL.COD,
+        gap_conc_nh3n_low_mg_l: s.gapConcLowMgL.NH3N, gap_conc_nh3n_high_mg_l: s.gapConcHighMgL.NH3N, note: s.note,
+      })),
+    ),
+  });
+  files.push({
+    fileName: 'meter_specs.csv',
+    kind: 'METER_SPEC_REGISTER',
+    receivedAt: B_RECEIVED,
+    note: '不确定度库：仪表精度、共用校准组、可接受调整范围',
+    text: serializeCsv(
+      ['meter_id', 'metric', 'label', 'rel_sigma', 'abs_sigma', 'cal_group', 'group_correlation', 'adjust_limit_rel', 'certificate', 'valid_from', 'valid_to', 'note'],
+      balanceMeters.map((m) => ({
+        meter_id: m.meterId, metric: m.metric, label: m.label, rel_sigma: m.relSigma, abs_sigma: m.absSigma,
+        cal_group: m.calGroup, group_correlation: m.groupCorrelation, adjust_limit_rel: m.adjustLimitRel,
+        certificate: m.certificate, valid_from: isoLocal(m.validFrom), valid_to: m.validTo === null ? '' : isoLocal(m.validTo), note: m.note,
+      })),
+    ),
+  });
+  files.push({
+    fileName: 'removal_params.csv',
+    kind: 'REMOVAL_PARAM_REGISTER',
+    receivedAt: B_RECEIVED,
+    note: '去除参数台账：去除范围的全部假设来源',
+    text: serializeCsv(
+      ['param_id', 'unit_id', 'pollutant', 'param', 'low', 'high', 'unit', 'note'],
+      balanceParams.map((p) => ({
+        param_id: p.paramId, unit_id: p.unitId ?? '', pollutant: p.pollutant, param: p.param,
+        low: p.low, high: p.high, unit: p.unit, note: p.note,
+      })),
+    ),
+  });
+  files.push({
+    fileName: 'pump_switches.csv',
+    kind: 'PUMP_SWITCH_LOG',
+    receivedAt: B_RECEIVED,
+    note: '回流泵切换事件：RETURN 支路据此拆腿',
+    text: serializeCsv(
+      ['switch_id', 'pump_id', 'at', 'from_stream_id', 'to_stream_id', 'reason', 'work_order'],
+      balanceSwitches.map((s) => ({
+        switch_id: s.switchId, pump_id: s.pumpId, at: isoLocal(s.at),
+        from_stream_id: s.fromStreamId, to_stream_id: s.toStreamId, reason: s.reason, work_order: s.workOrder,
+      })),
+    ),
+  });
+
+  // ---- 支路读数（5 min cadence）----
+  const readings: StreamReading[] = [];
+  const lateReadings: StreamReading[] = [];
+  const push = (streamId: string, meterId: string, metric: StreamReading['metric'], t: number, trueValue: number, late: boolean) => {
+    const bias = METER_BIAS[meterId] ?? 1;
+    const value = Math.round(trueValue * bias * 100) / 100;
+    const rec: StreamReading = {
+      readingId: `${late ? 'sl' : 'sr'}-${meterId}-${Math.floor(t / 1000)}`,
+      streamId,
+      meterId,
+      metric,
+      sampledAt: t,
+      dayKey: DAY,
+      receivedAt: late ? B_LATE_RECEIVED : B_READINGS_RECEIVED,
+      rawValue: value,
+      qualityFlag: 'VALID',
+      sourceFileId: `pending:${late ? 'late_flow_P1_2026-11-19.csv' : 'stream_readings_P1_2026-11-18.csv'}`,
+      sourceRow: 0,
+    };
+    if (late) lateReadings.push(rec);
+    else readings.push(rec);
+  };
+  for (let t = D0 + 5 * MIN; t < D0 + 24 * HOUR; t += 5 * MIN) {
+    const h = (t - D0) / HOUR;
+    const inBwGap = h >= 14 && h < 14 + 4 / 3;
+    push('S-IN', 'M-QIN', 'FLOW', t, qExt(h) + qBw(h), false);
+    push('S-OUT', 'M-QOUT', 'FLOW', t, qOut(h), false);
+    push(h < 11 ? 'S-RET-A' : 'S-RET-B', 'M-QR1', 'FLOW', t, qRet(h), false);
+    push('S-SL1', 'M-QS1', 'FLOW', t, qSl1(h), false);
+    push('S-SL2', 'M-QS2', 'FLOW', t, qSl2(h), false);
+    push('S-BW', 'M-QBW', 'FLOW', t, qBw(h), inBwGap);
+    push('S-IN', 'M-TIN', 'TRACER', t, mixed(h, cTrExt(h), cTrBw(h)), false);
+    push('S-OUT', 'M-TOUT', 'TRACER', t, cTrOut(h), false);
+    push('S-BW', 'M-TBW', 'TRACER', t, cTrBw(h), inBwGap);
+    push('S-IN', 'M-CIN', 'COD', t, mixed(h, cCodExt(h), cCodBw(h)), false);
+    push('S-OUT', 'M-COUT', 'COD', t, cCodOut(h), false);
+    push('S-BW', 'M-CBW', 'COD', t, cCodBw(h), inBwGap);
+    push('S-IN', 'M-NIN', 'NH3N', t, mixed(h, cNhExt(h), cNhBw(h)), false);
+    push('S-OUT', 'M-NOUT', 'NH3N', t, cNhOut(h), false);
+    push('S-BW', 'M-NBW', 'NH3N', t, cNhBw(h), inBwGap);
+  }
+  readings.forEach((r, i) => { r.sourceRow = i + 2; });
+  lateReadings.forEach((r, i) => { r.sourceRow = i + 2; });
+  const readingHeaders = ['reading_id', 'stream_id', 'meter_id', 'metric', 'sampled_at', 'received_at', 'raw_value', 'quality_flag'];
+  const toRows = (list: StreamReading[]) =>
+    list.map((r) => ({
+      reading_id: r.readingId, stream_id: r.streamId, meter_id: r.meterId, metric: r.metric,
+      sampled_at: isoLocal(r.sampledAt, true), received_at: isoLocal(r.receivedAt),
+      raw_value: r.rawValue, quality_flag: r.qualityFlag,
+    }));
+  files.push({
+    fileName: 'stream_readings_P1_2026-11-18.csv',
+    kind: 'STREAM_READINGS',
+    receivedAt: B_READINGS_RECEIVED,
+    note: `P1 边界支路读数（${readings.length} 行；反冲洗 14:00–15:20 遥测中断）`,
+    text: serializeCsv(readingHeaders, toRows(readings)),
+  });
+  const lateFile: BalanceFile = {
+    fileName: 'late_flow_P1_2026-11-19.csv',
+    kind: 'LATE_FLOW_BATCH',
+    receivedAt: B_LATE_RECEIVED,
+    note: `补传流量：反冲洗支路 14:00–15:20 缺测段（${lateReadings.length} 行），分析出具后到达`,
+    text: serializeCsv(readingHeaders, toRows(lateReadings)),
+  };
+
+  // ---- 液位记录（15 min）----
+  const levels: LevelRecord[] = [];
+  for (let t = D0; t <= D0 + 24 * HOUR; t += 15 * MIN) {
+    const h = (t - D0) / HOUR;
+    levels.push(
+      { recordId: `lv-U2-${Math.floor(t / 1000)}`, unitId: 'U2', at: t, levelM: Math.round(levelU2(h) * 1000) / 1000, receivedAt: B_READINGS_RECEIVED, sourceFileId: 'pending:level_log_P1_2026-11-18.csv' },
+      { recordId: `lv-U3-${Math.floor(t / 1000)}`, unitId: 'U3', at: t, levelM: Math.round(levelU3(h) * 1000) / 1000, receivedAt: B_READINGS_RECEIVED, sourceFileId: 'pending:level_log_P1_2026-11-18.csv' },
+    );
+  }
+  files.push({
+    fileName: 'level_log_P1_2026-11-18.csv',
+    kind: 'LEVEL_LOG',
+    receivedAt: B_READINGS_RECEIVED,
+    note: `液位记录（${levels.length} 行）：U2 生化池午间蓄水 0.4 m`,
+    text: serializeCsv(
+      ['record_id', 'unit_id', 'at', 'level_m', 'received_at'],
+      levels.map((l) => ({ record_id: l.recordId, unit_id: l.unitId, at: isoLocal(l.at), level_m: l.levelM, received_at: isoLocal(l.receivedAt) })),
+    ),
+  });
+
+  // ---- 工艺记录 ----
+  const processRecords: ProcessRecord[] = [];
+  for (let h = 0; h < 24; h += 1) {
+    processRecords.push(
+      { recordId: `pr-aer-${h}`, unitId: 'U2', kind: 'AERATION', from: D0 + h * HOUR, to: D0 + (h + 1) * HOUR, value: 1400, unit: 'm³/h', note: '生化池鼓风机 hourly 均值', sourceFileId: 'pending:process_log_P1_2026-11-18.csv' },
+      { recordId: `pr-do-${h}`, unitId: 'U2', kind: 'DO', from: D0 + h * HOUR, to: D0 + (h + 1) * HOUR, value: Math.round((2.2 + 0.3 * Math.sin((2 * Math.PI * (h - 6)) / 24)) * 100) / 100, unit: 'mg/L', note: '好氧段溶解氧 hourly 均值', sourceFileId: 'pending:process_log_P1_2026-11-18.csv' },
+    );
+  }
+  processRecords.push(
+    { recordId: 'pr-sl-1', unitId: 'U1', kind: 'SLUDGE_WASTE', from: at(6), to: at(6, 30), value: 30, unit: 'm³', note: '初沉排泥 06:00–06:30', sourceFileId: 'pending:process_log_P1_2026-11-18.csv' },
+    { recordId: 'pr-sl-2', unitId: 'U3', kind: 'SLUDGE_WASTE', from: at(20), to: at(20, 40), value: 30, unit: 'm³', note: '剩余污泥排放 20:00–20:40', sourceFileId: 'pending:process_log_P1_2026-11-18.csv' },
+    { recordId: 'pr-dose-1', unitId: 'U4', kind: 'DOSING', from: at(9), to: at(10), value: 150, unit: 'kg', note: 'PAC 投加（上午）', sourceFileId: 'pending:process_log_P1_2026-11-18.csv' },
+    { recordId: 'pr-dose-2', unitId: 'U4', kind: 'DOSING', from: at(15), to: at(16), value: 100, unit: 'kg', note: 'PAC 投加（下午）', sourceFileId: 'pending:process_log_P1_2026-11-18.csv' },
+  );
+  files.push({
+    fileName: 'process_log_P1_2026-11-18.csv',
+    kind: 'PROCESS_LOG',
+    receivedAt: B_READINGS_RECEIVED,
+    note: `工艺记录（${processRecords.length} 行）：曝气/溶解氧/排泥/投药，去除范围唯一依据`,
+    text: serializeCsv(
+      ['record_id', 'unit_id', 'kind', 'from', 'to', 'value', 'unit', 'note'],
+      processRecords.map((p) => ({
+        record_id: p.recordId, unit_id: p.unitId, kind: p.kind, from: isoLocal(p.from), to: isoLocal(p.to),
+        value: p.value, unit: p.unit, note: p.note,
+      })),
+    ),
+  });
+  return { files, lateFile };
+}
+
 function main(): void {
   mkdirSync(outDir, { recursive: true });
   const manifestBase: SampleManifest['baseFiles'] = [];
@@ -894,6 +1260,30 @@ function main(): void {
   );
   writeFileSync(resolve(outDir, lateFileName), lateText, 'utf8');
 
+  // ---- 工艺段平衡分析资料 ----
+  const balance = generateBalanceFiles();
+  const manifestBalance: NonNullable<SampleManifest['balanceFiles']> = [];
+  for (const f of balance.files) {
+    writeFileSync(resolve(outDir, f.fileName), f.text, 'utf8');
+    manifestBalance.push({
+      fileName: f.fileName,
+      kind: f.kind,
+      receivedAt: isoLocal(f.receivedAt),
+      rowCount: f.text.trim().split('\n').length - 1,
+      sha256: sha256(f.text),
+      note: f.note,
+    });
+  }
+  writeFileSync(resolve(outDir, balance.lateFile.fileName), balance.lateFile.text, 'utf8');
+  const manifestLateBalance: NonNullable<SampleManifest['lateBalanceFile']> = {
+    fileName: balance.lateFile.fileName,
+    kind: balance.lateFile.kind,
+    receivedAt: isoLocal(balance.lateFile.receivedAt),
+    rowCount: balance.lateFile.text.trim().split('\n').length - 1,
+    sha256: sha256(balance.lateFile.text),
+    note: balance.lateFile.note,
+  };
+
   const manifest: SampleManifest = {
     name: '排口负荷离线复核样例（虚构）',
     description:
@@ -908,6 +1298,20 @@ function main(): void {
       rowCount: lateReadings.length,
       sha256: sha256(lateText),
       note: '迟到补录：CC-E01 02:00–02:03 缺测段的 10 秒读数，申报出具后才到达。',
+    },
+    balanceFiles: manifestBalance,
+    lateBalanceFile: manifestLateBalance,
+    balanceFocus: {
+      plantId: 'P1',
+      day: DAY,
+      scenario: [
+        '反冲洗水混入主线：14:00–15:20 回流水 600 m³ 在进水计量点上游汇入，基础批次缺测，补传后残差缩窄',
+        '池内存量变化：生化池 08:00–12:00 蓄水 0.4 m（+800 m³），净 ΔV +100 m³',
+        '水力滞后：22:30 进水升高的可达时间带为次日 01:00–02:50，保持在途不强行配对',
+        '回流泵切换：11:00 P-R1 由 S-RET-A 切至 S-RET-B，内部循环从主线拆出',
+        '仪表误差叠加：各表偏差均在证书 k=2 区间内，路径 B 在证书边界内协调定位',
+        '停用支路：S-BYP 2026-11-20 起停用（2026-11-22 确认），不改写 11-18 平衡',
+      ],
     },
     focus: {
       pointCode: 'CC-E01',
@@ -926,8 +1330,10 @@ function main(): void {
   writeFileSync(resolve(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
   const totalRows = manifestBase.filter((f) => f.kind === 'READINGS').reduce((a, f) => a + f.rowCount, 0);
+  const balanceRows = manifestBalance.reduce((a, f) => a + f.rowCount, 0);
   console.log(`样例已生成：${outDir}`);
   console.log(`读数 ${totalRows} 行；迟到补录 ${lateReadings.length} 行；台账 ${registers.length} 份`);
+  console.log(`平衡分析资料 ${manifestBalance.length} 份 / ${balanceRows} 行；补传流量 ${manifestLateBalance.rowCount} 行`);
 }
 
 main();

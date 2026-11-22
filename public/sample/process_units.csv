@@ -1,0 +1,5 @@
+unit_id,plant_id,name,kind,surface_area_m2,lag_min_minutes,lag_max_minutes,note
+U1,P1,初沉池,PRIMARY_CLARIFIER,800,20,40,无液位计，存量变化按 0 处理并披露。
+U2,P1,生化池(A²/O),BIOREACTOR,2000,90,150,曝气与排泥记录所在单元；液位计 L-U2。
+U3,P1,二沉池,SECONDARY_CLARIFIER,1200,30,50,回流污泥自本单元抽出；液位计 L-U3。
+U4,P1,深度处理(高效沉淀+滤池),TERTIARY,400,10,20,反冲洗水回流至厂首；投药记录所在单元。

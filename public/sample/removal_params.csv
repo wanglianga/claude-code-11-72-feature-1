@@ -1,0 +1,10 @@
+param_id,unit_id,pollutant,param,low,high,unit,note
+RP-O2-KG-M3AIR,,COD,每 m³ 空气理论供氧量,0.3,0.3,kgO₂/m³,0.21 × 1.429 kg/m³。
+RP-ETA-O2,U2,COD,氧转移效率,0.28,0.42,-,微孔曝气典型范围（台账登记）。
+RP-NIT-FRAC,U2,NH3N,供氧分配硝化比例,0.3,0.42,-,按进水 C/N 与历史运行登记。
+RP-NIT-O2,,NH3N,硝化需氧量,4.57,4.57,kgO₂/kgN,理论值。
+RP-COD-PER-O2,U2,COD,碳氧化系数,0.85,1.1,kgCOD/kgO₂,含内源呼吸修正。
+RP-SLUDGE-TSS,,COD,排泥含固浓度,7,9,kgTSS/m³,排泥浓度化验登记范围。
+RP-SLUDGE-CODRATIO,,COD,污泥 COD/TSS 比,1,1.4,kgCOD/kgTSS,污泥成分化验登记范围。
+RP-PAC-COD,U4,COD,混凝剂单位去除,0.15,0.35,kgCOD/kg,PAC 投加化学沉淀去除。
+RP-DO-MIN,U2,COD,好氧去除最低溶解氧,1,1,mg/L,低于此值好氧去除折减。

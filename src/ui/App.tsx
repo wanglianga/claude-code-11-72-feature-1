@@ -11,6 +11,10 @@ import { IntakePage } from './pages/IntakePage';
 import { InstrumentPage } from './pages/InstrumentPage';
 import { MethodPage } from './pages/MethodPage';
 import { MonthPage } from './pages/MonthPage';
+import { BoundaryPage } from './pages/BoundaryPage';
+import { UncertaintyPage } from './pages/UncertaintyPage';
+import { BalancePage } from './pages/BalancePage';
+import { AttributionPage } from './pages/AttributionPage';
 import { METHOD_LABEL, fmtNum } from './format';
 
 const NAV: { key: string; label: string; group: string }[] = [
@@ -20,6 +24,10 @@ const NAV: { key: string; label: string; group: string }[] = [
   { key: 'quality', label: '覆盖与资格', group: '合规' },
   { key: 'month', label: '月度汇总', group: '合规' },
   { key: 'recalc', label: '复算候选', group: '合规' },
+  { key: 'balance', label: '平衡分析', group: '工艺段平衡' },
+  { key: 'boundary', label: '边界配置', group: '工艺段平衡' },
+  { key: 'uncertainty', label: '不确定度库', group: '工艺段平衡' },
+  { key: 'attribution', label: '归因复核', group: '工艺段平衡' },
   { key: 'verify', label: '样例核验', group: '质量保证' },
   { key: 'intake', label: '接入账', group: '资料' },
   { key: 'instruments', label: '设备履历', group: '资料' },
@@ -63,6 +71,9 @@ export function App() {
                 )}
                 {n.key === 'quality' && state.declarations.length > 0 && (
                   <span className="nav-badge">{state.declarations.length}</span>
+                )}
+                {n.key === 'attribution' && state.balanceAnalyses.some((a) => a.status === 'OPEN') && (
+                  <span className="nav-badge">{state.balanceAnalyses.filter((a) => a.status === 'OPEN').length}</span>
                 )}
               </button>
             ))}
@@ -160,6 +171,10 @@ export function App() {
           {state.ready && page === 'instruments' && <InstrumentPage state={state} actions={actions} />}
           {state.ready && page === 'method' && <MethodPage state={state} />}
           {state.ready && page === 'month' && <MonthPage state={state} actions={actions} />}
+          {state.ready && page === 'balance' && <BalancePage state={state} actions={actions} />}
+          {state.ready && page === 'boundary' && <BoundaryPage state={state} actions={actions} />}
+          {state.ready && page === 'uncertainty' && <UncertaintyPage state={state} actions={actions} />}
+          {state.ready && page === 'attribution' && <AttributionPage state={state} actions={actions} />}
         </div>
       </main>
 

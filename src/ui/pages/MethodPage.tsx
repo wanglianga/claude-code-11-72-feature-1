@@ -104,6 +104,46 @@ export function MethodPage({ state }: { state: AppState }) {
         </div>
       </div>
 
+      <div className="card">
+        <div className="card-head">
+          <h2>工艺段平衡分析口径</h2>
+          <span className="sub">边界登记 · 滞后匹配 · 双路径求解 · 版本不可改写</span>
+        </div>
+        <div className="card-pad grid cols-2">
+          <div className="stack">
+            <h3 className="small">边界与守恒对象</h3>
+            <ul className="list-reset stack" style={{ gap: 5 }}>
+              <li className="checkline"><span className="tick">·</span><span>每个工艺单元登记进出水、回流、排泥、反冲洗与液位；支路有有效期，停用支路只影响生效日之后，不改写过去的平衡。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>三类对象分开：水量、无反应示踪量（守恒）、COD/氨氮（可生物化学去除）。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>回流属内部循环，任何时候不计入主线闭合；回流泵中途切换按事件拆腿。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>反冲洗回流水在进水计量点上游汇入主线，必须从进水测量中扣除；缺测时段用登记估计补入区间。</span></li>
+            </ul>
+            <h3 className="small" style={{ marginTop: 8 }}>滞后匹配</h3>
+            <ul className="list-reset stack" style={{ gap: 5 }}>
+              <li className="checkline"><span className="tick">·</span><span>进水事件的可达时间带 = 事件时刻 + 全厂滞后带（各单元滞后带求和）；出水事件落在带内且同向才允许配对。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>进水升高尚未到达可达时间带时保持「在途」，绝不强行配对；在途量用时槽模型给出区间，前一日在途未知按 0 处理并披露。</span></li>
+            </ul>
+          </div>
+          <div className="stack">
+            <h3 className="small">路径 A：误差传播</h3>
+            <ul className="list-reset stack" style={{ gap: 5 }}>
+              <li className="checkline"><span className="tick">·</span><span>每项测量按 1σ 精度 × k=2 直接传播，给出保证不越界的水量与负荷残差区间；资料不足时区间可能宽到无法排序，但仍可使用。</span></li>
+            </ul>
+            <h3 className="small" style={{ marginTop: 8 }}>路径 B：受约束测量协调</h3>
+            <ul className="list-reset stack" style={{ gap: 5 }}>
+              <li className="checkline"><span className="tick">·</span><span>仅水量与示踪量参与：min Σ(Δx/σ)²，协方差按共用校准组构造（同一校准来源 → 误差相关）。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>调整量受证书边界约束，触及边界即钳制；仍无法闭合的部分保留为不可协调残差。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>COD/氨氮永不参与协调：正常去除不得调成测量误差；去除只能依据曝气、排泥、投药、溶解氧等工艺记录形成范围，缺少支持的部分保留为不可解释残差。</span></li>
+            </ul>
+            <h3 className="small" style={{ marginTop: 8 }}>版本与复核</h3>
+            <ul className="list-reset stack" style={{ gap: 5 }}>
+              <li className="checkline"><span className="tick">·</span><span>分析版本创建后不可改写；补传流量缩窄已审核残差时生成新版本（LATE_DATA），前版保持 REVIEWED。</span></li>
+              <li className="checkline"><span className="tick">·</span><span>归因台只追加归因结论与附注（OPEN → REVIEWED），结果体与来源指纹不变。</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
       <div className="card card-pad">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <div className="small muted">
